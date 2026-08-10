@@ -1,0 +1,23 @@
+# Lista curada de dependencias (editar a mano).
+# Para congelar versiones exactas:  pip install -r requirements.in && pip freeze > requirements.txt
+# Python objetivo: 3.14
+
+# --- Núcleo científico (Fase 0: modelo base + señales) ---
+numpy
+pandas
+scikit-learn
+scipy
+matplotlib
+
+# --- Notebooks / kernel ---
+ipykernel
+
+# --- Lectura de fuentes ---
+openpyxl        # .xlsx (Indicadores_Buro)
+pyarrow         # requerido para leer InfoModelamiento.pkl (columnas Arrow)
+# pyreadr       # solo si se re-corre el notebook 01 sobre el .RData (no necesario: InfoModelamiento.pkl ya existe)
+
+# --- Fases siguientes (se descomentan al construirlas) ---
+# (cliente LLM)   # política router con LLM
+# streamlit       # frontend de visualización
+# plotly          # gráficos interactivos del frontend

@@ -1,0 +1,21 @@
+# --- Entorno (NO portable, se recrea con requirements.txt) ---
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- Datos pesados (NO se versionan; ver data/README.md) ---
+data/buro/
+data/lendingclub/
+
+# --- Artefactos de modelo (regenerables desde los notebooks) ---
+models/*.pkl
+
+# --- Resultados de experimentos ---
+experiments/*.parquet
+experiments/*.csv
+experiments/runs/
+
+# --- Sistema ---
+.DS_Store
+.env
