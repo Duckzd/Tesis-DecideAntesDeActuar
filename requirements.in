@@ -17,7 +17,9 @@ openpyxl        # .xlsx (Indicadores_Buro)
 pyarrow         # requerido para leer InfoModelamiento.pkl (columnas Arrow)
 # pyreadr       # solo si se re-corre el notebook 01 sobre el .RData (no necesario: InfoModelamiento.pkl ya existe)
 
+# --- Fase 3: política agéntica con LLM ---
+anthropic       # SDK oficial de Anthropic — la política LLM investiga con herramientas
+
 # --- Fases siguientes (se descomentan al construirlas) ---
-# (cliente LLM)   # política router con LLM
 # streamlit       # frontend de visualización
 # plotly          # gráficos interactivos del frontend
