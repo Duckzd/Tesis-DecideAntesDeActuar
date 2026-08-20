@@ -11,9 +11,10 @@ data/lendingclub/
 # --- Artefactos de modelo (regenerables desde los notebooks) ---
 models/*.pkl
 
-# --- Resultados de experimentos ---
+# --- Resultados de experimentos (regenerables) ---
 experiments/*.parquet
 experiments/*.csv
+experiments/*.json
 experiments/runs/
 
 # --- Sistema ---
