@@ -3,8 +3,8 @@
 from .base import Accion, Contexto, Decision, Politica, REGISTRO, crear, registrar
 from .reglas import PoliticaReglas
 from .multisenal import PoliticaMultiSenal
-from .llm import PoliticaLLM, ClienteAnthropic, ClienteSimulado
+from .llm import PoliticaLLM, ClienteAnthropic, ClienteSimulado, guardar_cache, cargar_cache
 
 __all__ = ["Accion", "Contexto", "Decision", "Politica", "REGISTRO", "crear",
            "registrar", "PoliticaReglas", "PoliticaMultiSenal", "PoliticaLLM",
-           "ClienteAnthropic", "ClienteSimulado"]
+           "ClienteAnthropic", "ClienteSimulado", "guardar_cache", "cargar_cache"]

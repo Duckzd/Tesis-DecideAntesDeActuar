@@ -34,7 +34,7 @@ class PoliticaMultiSenal:
     def __init__(self, auc_baseline: float = 0.885, margen_auc: float = 0.05,
                  umbral_dist: float = 0.15, umbral_actuar: float = 0.6,
                  umbral_reconstruir: float = 0.85, persistencia: int = 2, cooldown: int = 3,
-                 retardo: int = 12):
+                 retardo: int = 12, lag: int = 1):
         self.auc_baseline = auc_baseline
         self.margen_auc = margen_auc
         self.umbral_dist = umbral_dist
@@ -42,7 +42,10 @@ class PoliticaMultiSenal:
         self.umbral_reconstruir = umbral_reconstruir
         self.persistencia = max(1, persistencia)
         self.cooldown = cooldown
-        self.retardo = retardo   # meses hasta que madura data puntuada por el modelo NUEVO
+        self.retardo = retardo   # meses de retardo de etiquetas
+        self.lag = lag           # meses hasta que la acción se despliega
+        # Confirmación válida recién a los retardo+lag meses: antes, la cohorte revelada
+        # fue puntuada por el modelo VIEJO (el nuevo se despliega con lag de retraso).
 
     def _persiste_dist(self, contexto: Contexto, psi_actual: float) -> bool:
         if self.persistencia == 1:
@@ -63,7 +66,7 @@ class PoliticaMultiSenal:
         # el modelo VIEJO (pre-arreglo) → es evidencia obsoleta, no confirma daño actual.
         # Solo cuenta si nunca intervine o si ya pasó el retardo desde la última acción.
         meses = reporte.meses_desde_intervencion
-        confirmado = meses is None or meses >= self.retardo
+        confirmado = meses is None or meses >= self.retardo + self.lag
         tiene_perf = reporte.etiquetas_disponibles and reporte.auc_revelado is not None and confirmado
         r_perf = _clip01((self.auc_baseline - reporte.auc_revelado) / self.margen_auc) if tiene_perf else None
 

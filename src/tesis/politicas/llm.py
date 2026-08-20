@@ -55,6 +55,20 @@ def _raiz_proyecto() -> Path:
     return aqui.parents[3]  # src/tesis/politicas/llm.py → raíz
 
 
+def guardar_cache(cache: dict, path: str | Path) -> None:
+    """Graba el trace de decisiones de una corrida a JSON (para re-leer sin API)."""
+    datos = {str(k): v for k, v in cache.items()}
+    Path(path).write_text(json.dumps(datos, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cargar_cache(path: str | Path) -> dict:
+    """Carga un trace de decisiones grabado; {} si no existe."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    return {int(k): v for k, v in json.loads(p.read_text(encoding="utf-8")).items()}
+
+
 def _cargar_api_key() -> str | None:
     """Devuelve la API key (de `.env` o del entorno); None si no está configurada."""
     if os.environ.get("ANTHROPIC_API_KEY"):
@@ -221,7 +235,17 @@ arreglo — es evidencia OBSOLETA, no prueba que sigas roto. Usa `historial_inte
 `meses_desde_intervencion` es menor que ~12, quedas CIEGO a si tu arreglo funcionó y el AUC \
 tardío bajo que ves es probablemente pre-arreglo → NO vuelvas a actuar, ESPERA la confirmación \
 (pagar otra acción sin saber si ya sanaste es puro desperdicio). Solo re-actúa si el AUC tardío \
-que ya es POST-arreglo (intervención hace ≥12 meses) sigue mostrando daño."""
+que ya es POST-arreglo (intervención hace ≥12 meses) sigue mostrando daño.
+
+CUIDADO también con los rendimientos decrecientes (techo de recuperación): un concept drift no \
+siempre se recupera del todo — tras re-ajustar, el desempeño puede estabilizarse en un TECHO por \
+debajo del baseline original y no subir más. No persigas el desempeño pristino para siempre. Antes \
+de re-actuar mira la TENDENCIA del AUC tardío (herramienta `tendencia` con 'auc_revelado') junto con \
+tu historial: si ya interviniste y el AUC se recuperó y luego se APLANÓ en un nivel estable (subió \
+tras tus acciones y dejó de mejorar), ese nivel es probablemente el máximo alcanzable → seguir \
+actuando solo gasta sin ganar, así que ESPERA y acepta ese techo. Vuelve a actuar solo si el daño \
+sigue siendo REDUCIBLE: el AUC aún cae, no probaste todavía una acción más fuerte, o ahora hay más \
+o mejor data que podría empujar la recuperación más arriba."""
 
 
 def _resumen_reporte(reporte) -> str:
@@ -295,8 +319,12 @@ class ClienteAnthropic:
 
     def responder(self, system: str, messages: list, tools: list):
         self._asegurar_cliente()
+        # Caché de prompt: system+herramientas son idénticos en cada llamada → se marcan
+        # para cachear y se pagan ~10% tras la 1ª vez (funciona en sonnet/opus; en haiku el
+        # prefijo es corto y puede no cachear, pero no estorba).
+        system_cache = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
         kwargs = dict(model=self.modelo, max_tokens=self.max_tokens,
-                      system=system, messages=messages, tools=tools)
+                      system=system_cache, messages=messages, tools=tools)
         if self.pensar:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         return self._client.messages.create(**kwargs)
@@ -356,18 +384,18 @@ class ClienteSimulado:
         return {}
 
     @staticmethod
-    def _regla(d: dict, retardo: int = 12) -> tuple[str, str]:
+    def _regla(d: dict, espera_confirmacion: int = 13) -> tuple[str, str]:
         auc = d.get("auc_revelado")
         psi = d.get("psi_score") or 0.0
         meses = d.get("meses_desde_intervencion")
-        # Confirmación consciente del retardo: el AUC tardío solo cuenta si nunca intervine
-        # o si ya pasó el retardo (data post-arreglo). Si no, quedo ciego → espero.
-        confirmado = meses is None or meses >= retardo
+        # Confirmación consciente del retardo + lag de despliegue: el AUC tardío solo cuenta
+        # si nunca intervine o si ya maduró data puntuada por el modelo NUEVO. Si no, ciego → espero.
+        confirmado = meses is None or meses >= espera_confirmacion
         if auc is not None and confirmado and auc < 0.835:      # daño confirmado (post-arreglo)
             accion = "reconstruir" if auc < 0.70 else "reentrenar"
             return accion, f"[simulado] AUC tardío {auc} confirma daño (confirmación válida)"
         if auc is not None and not confirmado and auc < 0.835:  # ciego: intervine hace poco
-            return "esperar", f"[simulado] intervine hace {meses}m (<{retardo}) → espero confirmación"
+            return "esperar", f"[simulado] intervine hace {meses}m (<{espera_confirmacion}) → espero confirmación"
         if auc is not None and confirmado and auc >= 0.86 and psi >= 0.15:  # PSI alto pero AUC sano
             return "esperar", f"[simulado] PSI {psi} alto pero AUC {auc} sano → covariate"
         if psi >= 0.20:
@@ -395,13 +423,42 @@ class PoliticaLLM:
     """
 
     def __init__(self, cliente: ClienteLLM | None = None, modelo: str = "claude-opus-5",
-                 max_iteraciones: int = 4, pensar: bool = True):
+                 max_iteraciones: int = 4, pensar: bool = True, cache: dict | None = None):
         self.cliente = cliente if cliente is not None else ClienteAnthropic(modelo, pensar=pensar)
         self.modelo = modelo
         self.max_iteraciones = max(1, max_iteraciones)
         self.trazas: list[dict] = []   # log de cada decisión (para documentar en la tesis)
+        # Caché de decisiones POR CORRIDA (un trace grabado): {periodo: {accion, razon}}.
+        # Si el periodo ya está, se re-lee SIN llamar a la API (reproduce esa corrida gratis).
+        # La variabilidad del LLM se estudia aparte, con N corridas frescas (cachés distintos).
+        self.cache = cache
+        self.uso = {"llamadas": 0, "input_tokens": 0, "output_tokens": 0,
+                    "cache_read_input_tokens": 0}   # consumo acumulado (visibilidad de costo)
+
+    def _registrar_uso(self, resp) -> None:
+        """Acumula el consumo de tokens de una llamada (para visibilidad del costo)."""
+        u = getattr(resp, "usage", None)
+        if u is None:
+            return
+        self.uso["llamadas"] += 1
+        self.uso["input_tokens"] += getattr(u, "input_tokens", 0) or 0
+        self.uso["output_tokens"] += getattr(u, "output_tokens", 0) or 0
+        self.uso["cache_read_input_tokens"] += getattr(u, "cache_read_input_tokens", 0) or 0
+
+    def _finalizar(self, dec: Decision, traza: dict, periodo: int) -> Decision:
+        traza["decision"] = {"accion": dec.accion.value, "razon": dec.razon}
+        self.trazas.append(traza)
+        if self.cache is not None:                 # grabar en el trace de esta corrida
+            self.cache[periodo] = {"accion": dec.accion.value, "razon": dec.razon}
+        return dec
 
     def decidir(self, reporte, contexto: Contexto) -> Decision:
+        # Caché de decisiones: si esta corrida ya decidió este periodo, re-leer SIN API.
+        if self.cache is not None and reporte.periodo in self.cache:
+            g = self.cache[reporte.periodo]
+            self.trazas.append({"periodo": reporte.periodo, "desde_cache": True, "decision": g})
+            return Decision(Accion(g["accion"]), g.get("razon", "") + " [cache]")
+
         messages = [{"role": "user", "content": _resumen_reporte(reporte)}]
         traza: dict = {"periodo": reporte.periodo, "herramientas_usadas": [],
                        "razonamiento": [], "iteraciones": 0}
@@ -409,6 +466,7 @@ class PoliticaLLM:
         for _ in range(self.max_iteraciones):
             traza["iteraciones"] += 1
             resp = self.cliente.responder(SYSTEM, messages, TODAS_LAS_HERRAMIENTAS)
+            self._registrar_uso(resp)
 
             # Capturar razonamiento (resúmenes de thinking) para las trazas.
             for b in resp.content:
@@ -417,20 +475,14 @@ class PoliticaLLM:
 
             bloques_tool = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
             if not bloques_tool:
-                # El LLM respondió sin llamar herramientas → no hay decisión estructurada.
-                break
+                break                              # respondió sin herramientas → sin decisión
 
             messages.append({"role": "assistant", "content": resp.content})
 
-            # ¿Emitió su decisión final?
             decision_bloque = next((b for b in bloques_tool if b.name == "registrar_decision"), None)
             if decision_bloque is not None:
-                dec = self._parsear_decision(decision_bloque.input)
-                traza["decision"] = {"accion": dec.accion.value, "razon": dec.razon}
-                self.trazas.append(traza)
-                return dec
+                return self._finalizar(self._parsear_decision(decision_bloque.input), traza, reporte.periodo)
 
-            # Si no, ejecutar las herramientas de investigación y devolver resultados.
             resultados = []
             for b in bloques_tool:
                 salida = ejecutar_herramienta(b.name, b.input or {}, reporte, contexto)
@@ -439,11 +491,13 @@ class PoliticaLLM:
                                    "content": json.dumps(salida, ensure_ascii=False)})
             messages.append({"role": "user", "content": resultados})
 
-        # Fallback: el LLM no emitió una decisión estructurada.
         dec = Decision(Accion.ESPERAR, "el LLM no emitió una decisión en el límite de iteraciones")
-        traza["decision"] = {"accion": dec.accion.value, "razon": dec.razon}
-        self.trazas.append(traza)
-        return dec
+        return self._finalizar(dec, traza, reporte.periodo)
+
+    def costo_estimado(self, precio_in: float, precio_out: float) -> float:
+        """Costo aproximado en USD dado el precio por millón de tokens (input/output)."""
+        return round(self.uso["input_tokens"] / 1e6 * precio_in
+                     + self.uso["output_tokens"] / 1e6 * precio_out, 4)
 
     @staticmethod
     def _parsear_decision(entrada: dict) -> Decision:
